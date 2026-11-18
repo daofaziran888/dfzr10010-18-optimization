@@ -1,4 +1,8 @@
-"""数据回滚恢复接口：维护回滚记录，覆盖执行回滚、确认恢复、归档记录等动作。"""
+"""数据回滚恢复接口：维护回滚记录，覆盖执行回滚、确认恢复、归档记录等动作。
+
+回滚清单消费同一份可恢复快照数据集，并按策略纪元解释受保护版本；
+核对结论与差异回写到快照保留审计清单。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -7,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
 from app.services.rollback import RollbackService
+from app.services.snapshot_audit import audit_service
 
 router = APIRouter(prefix="/api/rollback", tags=["数据回滚恢复"])
 
@@ -14,6 +19,59 @@ service = RollbackService()
 
 LIST_FIELDS = ["记录编号", "表名称", "回滚版本", "回滚原因", "影响范围", "恢复耗时", "回滚时间", "回滚状态"]
 STATUSES = ["待回滚", "回滚中", "已回滚", "已恢复"]
+
+
+# ---------- 消费可恢复快照数据集 ----------
+
+
+@router.get("/audit")
+def get_audit(
+    epoch: int | None = Query(default=None, description="策略纪元，缺省为当前已发布版本"),
+) -> dict[str, Any]:
+    """回滚入口读取快照保留审计清单：与表快照入口返回同一批条目。"""
+    return {
+        "ok": True,
+        "epoch": audit_service.resolve_epoch(epoch),
+        "items": audit_service.audit_entries(epoch),
+    }
+
+
+@router.get("/dataset")
+def get_dataset(
+    epoch: int | None = Query(default=None, description="策略纪元，缺省为当前已发布版本"),
+) -> dict[str, Any]:
+    """回滚清单按同一策略版本解释可恢复快照集合中的受保护版本。"""
+    return service.interpret_dataset(epoch)
+
+
+@router.post("/audit/verify")
+def post_audit_verify(payload: EntryPayload) -> dict[str, Any]:
+    """回滚模块比对当前可恢复快照数据集，结论写回快照保留审计清单。"""
+    epoch = payload.values.get("epoch")
+    if epoch in (None, ""):
+        resolved = None
+    else:
+        try:
+            resolved = int(epoch)
+        except (TypeError, ValueError):
+            return {"ok": False, "message": "epoch 必须是整数"}
+    return audit_service.verify(resolved)
+
+
+@router.post("/audit/sync")
+def post_audit_sync() -> dict[str, Any]:
+    """回滚入口读取同一份可恢复快照数据集，并把结果同步到快照保留审计清单。"""
+    return audit_service.sync_from_dataset()
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出数据回滚恢复清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "rollback", "total": total, "items": items}
+
+
+# ---------- 回滚记录 CRUD ----------
 
 
 @router.get("", response_model=PageResult[dict])
@@ -30,15 +88,6 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
-@router.get("/{entry_id}", response_model=dict)
-def get_entry(entry_id: int) -> dict:
-    """读取单条回滚记录明细；不存在时给出可读的错误说明。"""
-    entry = service.get_entry(entry_id)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"回滚记录 {entry_id} 不存在或已归档")
-    return entry
-
-
 @router.post("", response_model=ActionResult)
 def create_entry(payload: EntryPayload) -> ActionResult:
     """登记一条回滚记录，缺字段时说明原因而不是静默丢弃。"""
@@ -46,6 +95,15 @@ def create_entry(payload: EntryPayload) -> ActionResult:
     if missing:
         return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
     return ActionResult(ok=True, message="回滚记录已登记", entry=entry)
+
+
+@router.get("/{entry_id}", response_model=dict)
+def get_entry(entry_id: int) -> dict:
+    """读取单条回滚记录明细；不存在时给出可读的错误说明。"""
+    entry = service.get_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"回滚记录 {entry_id} 不存在或已归档")
+    return entry
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
@@ -56,10 +114,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出数据回滚恢复清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "rollback", "total": total, "items": items}

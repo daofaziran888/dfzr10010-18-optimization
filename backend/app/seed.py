@@ -579,5 +579,126 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
   '数据范围': '数据迁移管理样例3',
   '校验规则': '数据迁移管理样例3',
   '迁移耗时': '数据迁移管理样例3',
-  '任务状态': '数据迁移管理样例3'}]
+  '任务状态': '数据迁移管理样例3'}],
+
+    "snapshot_reference": [
+        {'id': 1, 'snapshot_id': 'SNAP-CE-20261112-07', 'version': 'SNAP-CE-20261112-07', 'kind': 'restore_chain', 'source': 'RB-20261113-21', 'note': '回滚记录 RB-20261113-21 的恢复链'},
+        {'id': 2, 'snapshot_id': 'SNAP-CE-20261112-07', 'version': 'SNAP-CE-20261112-07', 'kind': 'branch_ref', 'source': 'branch:customer_events-restore', 'note': '恢复分支当前引用'},
+        {'id': 3, 'snapshot_id': 'SNAP-CE-20261105-02', 'version': 'SNAP-CE-20261105-02', 'kind': 'restore_chain', 'source': 'RB-20261106-08', 'note': '历史回滚链'},
+        {'id': 4, 'snapshot_id': 'SNAP-CE-20261118-11', 'version': 'SNAP-CE-20261118-11', 'kind': 'branch_ref', 'source': 'branch:customer_events', 'note': '主干分支最新快照'},
+    ],
+    "snapshot_dataset": [
+        {'id': 1, 'epoch': 1, 'retention_days': 30, 'batch_date': '2026-11-17',
+         'protected': [
+             {'快照编号': 'SNAP-CE-20261112-07', '表名称': 'customer_events', '快照时间': '2026-11-12', '保留天数': 30, '受保护原因': '恢复链、分支引用'},
+             {'快照编号': 'SNAP-CE-20261105-02', '表名称': 'customer_events', '快照时间': '2026-11-05', '保留天数': 30, '受保护原因': '恢复链'},
+         ],
+         'candidates': [],
+         'scanned_total': 82, 'delta': 82, 'reused': 0, 'incremental': False, 'strategy': 'seed',
+         'published': True, 'published_at': '2026-11-17T02:00:00'},
+    ],
+    "snapshot_audit": [
+        {'id': 1, 'epoch': 1, 'retention_days': 30, 'batch_date': '2026-11-17', 'dataset_version': 1,
+         'protected_versions': ['SNAP-CE-20261105-02', 'SNAP-CE-20261112-07'],
+         'candidate_versions': [],
+         'diff': {'added_protected': ['SNAP-CE-20261105-02', 'SNAP-CE-20261112-07'], 'removed_protected': [], 'added_candidates': [], 'removed_candidates': []},
+         'summary': '新增受保护 2 个', 'published_at': '2026-11-17T02:00:00', 'revision_seq': 0},
+    ],
+    "snapshot_policy": [
+        {'id': 1, 'retention_days': 30, 'epoch': 1, 'revised_at': '2026-11-12T09:00:00', 'revision_seq': 0, 'stale': False},
+    ],
+    "snapshot_batch_cursor": [
+        {'id': 1, 'scanned': ['SNAP-CE-20261112-07'], 'epoch': 1},
+    ],
 }
+
+# ---------------------------------------------------------------------------
+# customer_events 快照场景：120 个快照，其中 38 个是上一纪元之后新增的清单增量。
+# SNAP-CE-20261112-07 被回滚记录 RB-20261113-21 引用（恢复链 + 分支引用），必须一直受保护。
+# ---------------------------------------------------------------------------
+from datetime import date as _date, timedelta as _timedelta
+
+_TABLE = "customer_events"
+_TOTAL = 120
+_SPECIALS = [
+    ("2026-11-05", "SNAP-CE-20261105-02"),
+    ("2026-11-12", "SNAP-CE-20261112-07"),
+    ("2026-11-18", "SNAP-CE-20261118-11"),
+]
+_BASE_DAY = _date(2026, 8, 21)
+_SPAN_DAYS = 79
+_DELTA_COUNT = 38
+
+
+def _customer_event_versions() -> list[tuple[str, str]]:
+    """生成 120 个快照版本：117 个按日期铺开，3 个是场景指定的关键版本。"""
+    reserved = {snapshot_id for _, snapshot_id in _SPECIALS}
+    per_day: dict[_date, int] = {}
+    versions: list[tuple[str, str]] = []
+    index = 0
+    while len(versions) < _TOTAL - len(_SPECIALS):
+        day = _BASE_DAY + _timedelta(days=(index * _SPAN_DAYS) // (_TOTAL - len(_SPECIALS)))
+        per_day[day] = per_day.get(day, 0) + 1
+        snapshot_id = f"SNAP-CE-{day.strftime('%Y%m%d')}-{per_day[day]:02d}"
+        if snapshot_id not in reserved:
+            versions.append((day.isoformat(), snapshot_id))
+        index += 1
+    versions.extend(_SPECIALS)
+    return versions
+
+
+def _install_customer_events() -> None:
+    snapshots = SEED_ROWS["snapshot"]
+    existing = {row["快照编号"] for row in snapshots}
+    next_id = max(row["id"] for row in snapshots) + 1
+    for day, snapshot_id in _customer_event_versions():
+        if snapshot_id in existing:
+            continue
+        snapshots.append({
+            "id": next_id,
+            "status": "保留中",
+            "pending": True,
+            "abnormal": False,
+            "快照编号": snapshot_id,
+            "表名称": _TABLE,
+            "快照时间": day,
+            "快照版本": snapshot_id.rsplit("-", 1)[-1],
+            "快照大小": "128 MiB",
+            "保留天数": 30,
+            "创建方式": "增量写入",
+            "快照状态": "保留中",
+        })
+        existing.add(snapshot_id)
+        next_id += 1
+
+    # 回滚记录 RB-20261113-21 引用 SNAP-CE-20261112-07；与回滚清单同一版本解释。
+    rollback_rows = SEED_ROWS["rollback"]
+    if not any(row["记录编号"] == "RB-20261113-21" for row in rollback_rows):
+        rollback_rows.append({
+            "id": max(row["id"] for row in rollback_rows) + 1,
+            "status": "已回滚",
+            "pending": False,
+            "abnormal": False,
+            "记录编号": "RB-20261113-21",
+            "表名称": _TABLE,
+            "回滚版本": "SNAP-CE-20261112-07",
+            "回滚原因": "误删分区数据回滚",
+            "影响范围": "分区 dt=2026-11-11",
+            "恢复耗时": "42s",
+            "回滚时间": "2026-11-13",
+            "回滚状态": "已回滚",
+        })
+
+    # 上一纪元已扫描 82 个版本，剩下 38 个是本次增量。
+    ordered = sorted(
+        (row["快照编号"], str(row["快照时间"])) for row in snapshots if row.get("表名称") == _TABLE
+    )
+    new_versions = {snapshot_id for snapshot_id, _ in ordered[-_DELTA_COUNT:]}
+    cursor = SEED_ROWS["snapshot_batch_cursor"][0]
+    cursor["scanned"] = sorted(
+        [snapshot_id for snapshot_id, _ in ordered if snapshot_id not in new_versions]
+        + [row["快照编号"] for row in snapshots if row.get("表名称") != _TABLE]
+    )
+
+
+_install_customer_events()

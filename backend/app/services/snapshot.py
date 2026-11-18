@@ -3,13 +3,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.snapshot_rules import (
+    NEGATIVE_ACTIONS,
+    SNAPSHOT_STATUSES as STATUS_ORDER,
+    snapshot_status,
+)
 from app.store import store
 
 MODULE = "snapshot"
 REQUIRED_FIELDS = ["快照编号", "表名称", "快照时间"]
-STATUS_ORDER = ["已创建", "保留中", "已过期", "已清理"]
 ACTION_RULES = {"创建快照": "已创建", "恢复快照": "保留中", "清理快照": "已过期"}
-NEGATIVE_ACTIONS = []
 
 
 class SnapshotService:
@@ -52,7 +55,7 @@ class SnapshotService:
             return None, f"快照记录 {entry_id} 不存在或已归档"
         if action not in ACTION_RULES:
             return None, f"动作「{action}」不属于表快照管理可执行范围"
-        target = ACTION_RULES[action]
+        target = snapshot_status(action)
         if target not in STATUS_ORDER:
             return None, f"目标状态「{target}」不在允许的状态序列里"
         entry["status"] = target

@@ -28,6 +28,12 @@ class EntryPayload(BaseModel):
     remark: str | None = None
 
 
+class PolicyUpdate(BaseModel):
+    """调整快照保留策略时提交的保留天数。"""
+
+    retention_days: int = Field(gt=0, description="新增快照的保留天数，必须是正整数")
+
+
 
 class TablefmtEntry(BaseModel):
     """表格式配置明细结构。"""
